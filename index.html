@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Liquid Glass 3D</title>
+
+<style>
+html,body{
+  margin:0;
+  overflow:hidden;
+  background:#0b1020;
+  font-family:system-ui;
+}
+
+canvas{
+  position:fixed;
+  inset:0;
+}
+
+.ui{
+  position:fixed;
+  top:20px;
+  left:20px;
+  background:rgba(255,255,255,0.08);
+  backdrop-filter:blur(20px);
+  padding:16px;
+  border-radius:18px;
+  color:white;
+}
+
+button{
+  margin-top:8px;
+  padding:10px 14px;
+  border:none;
+  border-radius:12px;
+  background:linear-gradient(135deg,#6366f1,#06b6d4);
+  color:white;
+  font-weight:600;
+}
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div class="ui">
+  <strong>Liquid Glass 3D</strong><br>
+  Incline ton téléphone ✨
+  <br>
+  <button id="start">Activer mouvement</button>
+</div>
+
+<script>
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let W,H,dpr;
+
+function resize(){
+  dpr = window.devicePixelRatio || 1;
+  W = canvas.width = innerWidth * dpr;
+  H = canvas.height = innerHeight * dpr;
+  canvas.style.width = innerWidth+"px";
+  canvas.style.height = innerHeight+"px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+resize();
+addEventListener("resize",resize);
+
+/* ---------- BACKGROUND (pour refraction) ---------- */
+const bgCanvas = document.createElement("canvas");
+const bgCtx = bgCanvas.getContext("2d");
+
+function drawBackground(){
+  bgCanvas.width = W;
+  bgCanvas.height = H;
+  const g = bgCtx.createLinearGradient(0,0,W,H);
+  g.addColorStop(0,"#1e3a8a");
+  g.addColorStop(1,"#0f172a");
+  bgCtx.fillStyle=g;
+  bgCtx.fillRect(0,0,W,H);
+
+  // motifs lumineux
+  for(let i=0;i<50;i++){
+    bgCtx.fillStyle="rgba(255,255,255,0.03)";
+    bgCtx.beginPath();
+    bgCtx.arc(Math.random()*W,Math.random()*H,Math.random()*150,0,Math.PI*2);
+    bgCtx.fill();
+  }
+}
+drawBackground();
+
+/* ---------- PHYSIQUE 3D ---------- */
+const BALLS = [];
+const COUNT = 18;
+const BOX = {x:600,y:900,z:800};
+const FOV = 900;
+
+class Ball{
+  constructor(){
+    this.r = 60 + Math.random()*40;
+    this.x = (Math.random()-0.5)*BOX.x;
+    this.y = (Math.random()-0.5)*BOX.y;
+    this.z = (Math.random()-0.5)*BOX.z;
+    this.vx = 0;
+    this.vy = 0;
+    this.vz = 0;
+  }
+
+  update(gx,gy,gz){
+    this.vx += gx;
+    this.vy += gy;
+    this.vz += gz;
+
+    this.vx *= 0.995;
+    this.vy *= 0.995;
+    this.vz *= 0.995;
+
+    this.x += this.vx;
+    this.y += this.vy;
+    this.z += this.vz;
+
+    // collisions box
+    ["x","y","z"].forEach(axis=>{
+      if(this[axis] > BOX[axis]/2){
+        this[axis]=BOX[axis]/2;
+        this["v"+axis]*=-0.8;
+      }
+      if(this[axis] < -BOX[axis]/2){
+        this[axis]=-BOX[axis]/2;
+        this["v"+axis]*=-0.8;
+      }
+    });
+  }
+
+  project(cam){
+    // rotation caméra
+    let x = this.x;
+    let y = this.y;
+    let z = this.z;
+
+    // rotation Y (yaw)
+    let cosY = Math.cos(cam.yaw);
+    let sinY = Math.sin(cam.yaw);
+    let dx = cosY*x - sinY*z;
+    let dz = sinY*x + cosY*z;
+
+    // rotation X (pitch)
+    let cosX = Math.cos(cam.pitch);
+    let sinX = Math.sin(cam.pitch);
+    let dy = cosX*y - sinX*dz;
+    dz = sinX*y + cosX*dz;
+
+    const scale = FOV/(FOV+dz);
+    return {
+      x: dx*scale + innerWidth/2,
+      y: dy*scale + innerHeight/2,
+      r: this.r*scale,
+      depth: dz
+    };
+  }
+}
+
+for(let i=0;i<COUNT;i++){
+  BALLS.push(new Ball());
+}
+
+/* ---------- CAM & GRAVITY ---------- */
+let gravity = {x:0,y:0,z:0};
+let camera = {yaw:0,pitch:0};
+
+function handleOrientation(e){
+  const gamma = e.gamma || 0;
+  const beta = e.beta || 0;
+  const alpha = e.alpha || 0;
+
+  camera.yaw = gamma * 0.01;
+  camera.pitch = beta * 0.01;
+
+  gravity.x = gamma * 0.02;
+  gravity.z = -beta * 0.02;
+  gravity.y = 0.4; // légère gravité constante
+}
+
+function enableMotion(){
+  if(typeof DeviceOrientationEvent.requestPermission==="function"){
+    DeviceOrientationEvent.requestPermission()
+    .then(res=>{
+      if(res==="granted"){
+        addEventListener("deviceorientation",handleOrientation);
+      }
+    });
+  }else{
+    addEventListener("deviceorientation",handleOrientation);
+  }
+}
+
+document.getElementById("start").onclick=enableMotion;
+
+/* ---------- RENDER ---------- */
+function drawLiquidSphere(p){
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+  ctx.clip();
+
+  // refraction (zoom léger du fond)
+  ctx.drawImage(
+    bgCanvas,
+    p.x-p.r*1.2,
+    p.y-p.r*1.2,
+    p.r*2.4,
+    p.r*2.4,
+    p.x-p.r,
+    p.y-p.r,
+    p.r*2,
+    p.r*2
+  );
+
+  ctx.restore();
+
+  // corps verre
+  const g = ctx.createRadialGradient(
+    p.x-p.r*0.3,
+    p.y-p.r*0.3,
+    p.r*0.2,
+    p.x,
+    p.y,
+    p.r
+  );
+  g.addColorStop(0,"rgba(255,255,255,0.6)");
+  g.addColorStop(0.3,"rgba(255,255,255,0.15)");
+  g.addColorStop(1,"rgba(255,255,255,0.05)");
+
+  ctx.fillStyle=g;
+  ctx.beginPath();
+  ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+  ctx.fill();
+
+  // reflet brillant
+  ctx.beginPath();
+  ctx.arc(p.x-p.r*0.4,p.y-p.r*0.4,p.r*0.25,0,Math.PI*2);
+  ctx.fillStyle="rgba(255,255,255,0.8)";
+  ctx.fill();
+
+  // contour lumineux
+  ctx.strokeStyle="rgba(255,255,255,0.4)";
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+  ctx.stroke();
+}
+
+function animate(){
+  ctx.clearRect(0,0,innerWidth,innerHeight);
+  ctx.drawImage(bgCanvas,0,0,innerWidth,innerHeight);
+
+  BALLS.forEach(b=>b.update(gravity.x,gravity.y,gravity.z));
+
+  const projected = BALLS.map(b=>b.project(camera))
+                         .sort((a,b)=>b.depth-a.depth);
+
+  projected.forEach(p=>drawLiquidSphere(p));
+
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+
+</body>
+</html>
