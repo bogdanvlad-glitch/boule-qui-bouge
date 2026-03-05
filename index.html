@@ -1,65 +1,565 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Liquid Glass 3D</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Liquid Glass Tilt 3D</title>
 
 <style>
-html,body{
-  margin:0;
-  overflow:hidden;
-  background:#0b1020;
-  font-family:system-ui;
-}
+  html,body{
+    margin:0;
+    height:100%;
+    overflow:hidden;
+    background:#0b1020;
+    font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    touch-action:none;
+  }
+  canvas{ position:fixed; inset:0; }
 
-canvas{
-  position:fixed;
-  inset:0;
-}
-
-.ui{
-  position:fixed;
-  top:20px;
-  left:20px;
-  background:rgba(255,255,255,0.08);
-  backdrop-filter:blur(20px);
-  padding:16px;
-  border-radius:18px;
-  color:white;
-}
-
-button{
-  margin-top:8px;
-  padding:10px 14px;
-  border:none;
-  border-radius:12px;
-  background:linear-gradient(135deg,#6366f1,#06b6d4);
-  color:white;
-  font-weight:600;
-}
+  .ui{
+    position:fixed;
+    top:16px; left:16px;
+    padding:14px 14px 12px;
+    border-radius:18px;
+    color:#fff;
+    background:rgba(255,255,255,0.08);
+    backdrop-filter: blur(18px);
+    box-shadow:0 16px 50px rgba(0,0,0,0.35);
+    user-select:none;
+  }
+  .row{ display:flex; gap:8px; margin-top:10px; }
+  button{
+    padding:10px 12px;
+    border:none;
+    border-radius:12px;
+    cursor:pointer;
+    color:white;
+    font-weight:700;
+    background:linear-gradient(135deg,#6366f1,#06b6d4);
+  }
+  button.secondary{
+    background:rgba(255,255,255,0.12);
+    font-weight:650;
+  }
+  .hint{
+    font-size:12px;
+    opacity:.75;
+    margin-top:6px;
+    line-height:1.25;
+    max-width:260px;
+  }
+  .dbg{
+    margin-top:8px;
+    font-size:12px;
+    opacity:.75;
+    font-variant-numeric: tabular-nums;
+  }
 </style>
 </head>
-<body>
 
+<body>
 <canvas id="c"></canvas>
 
 <div class="ui">
-  <strong>Liquid Glass 3D</strong><br>
-  Incline ton téléphone ✨
-  <br>
-  <button id="start">Activer mouvement</button>
+  <div><strong>Liquid Glass Tilt 3D</strong></div>
+  <div class="hint">
+    1) Pose ton tel à plat → <b>Calibrer</b><br/>
+    2) Penche → les boules roulent dans la direction.
+  </div>
+  <div class="row">
+    <button id="start">Activer capteurs</button>
+    <button id="calib" class="secondary">Calibrer</button>
+  </div>
+  <div class="dbg" id="dbg">Capteurs: en attente…</div>
 </div>
 
 <script>
-const canvas = document.getElementById("c");
-const ctx = canvas.getContext("2d");
-let W,H,dpr;
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha:false });
 
-function resize(){
-  dpr = window.devicePixelRatio || 1;
-  W = canvas.width = innerWidth * dpr;
-  H = canvas.height = innerHeight * dpr;
+  // ---------- CONFIG ----------
+  const CFG = {
+    COUNT: 120,          // plein de petites boules
+    R_MIN: 7,
+    R_MAX: 15,
+    DEPTH_MIN: -180,     // profondeur (3D) douce, pas extrême
+    DEPTH_MAX: 180,
+    FOV: 900,            // perspective
+    RESTITUTION: 0.78,
+    DAMPING: 2.4,        // friction "air" (par seconde)
+    ACCEL_SCALE: 210,    // px/s² par m/s² (sensibilité)
+    ACCEL_SCALE_Z: 35,   // faible, juste un petit "vivant" en profondeur
+    CAMERA_MAX: 0.22,    // rad (petit effet 3D)
+    CAMERA_SMOOTH: 0.10,
+    REFRACTION: true     // si ça rame sur ton tel => mets false
+  };
+
+  // ---------- SIZING ----------
+  let vw=innerWidth, vh=innerHeight, dpr=1;
+  const bgCanvas = document.createElement("canvas");
+  const bgCtx = bgCanvas.getContext("2d");
+
+  const bounds = { halfW: vw/2, halfH: vh/2 };
+
+  function resize(){
+    dpr = window.devicePixelRatio || 1;
+    vw = innerWidth; vh = innerHeight;
+
+    canvas.width  = Math.round(vw * dpr);
+    canvas.height = Math.round(vh * dpr);
+    canvas.style.width = vw + "px";
+    canvas.style.height = vh + "px";
+
+    // coordonnées en pixels CSS
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+
+    bgCanvas.width = vw;
+    bgCanvas.height = vh;
+    drawBackground();
+
+    bounds.halfW = vw/2;
+    bounds.halfH = vh/2;
+
+    // recale les boules dans l'écran
+    for(const b of balls){
+      b.x = clamp(b.x, -bounds.halfW + b.r, bounds.halfW - b.r);
+      b.y = clamp(b.y, -bounds.halfH + b.r, bounds.halfH - b.r);
+      b.z = clamp(b.z, CFG.DEPTH_MIN, CFG.DEPTH_MAX);
+    }
+  }
+  addEventListener("resize", resize);
+
+  // ---------- BACKGROUND (static, pour refraction) ----------
+  function drawBackground(){
+    const g = bgCtx.createLinearGradient(0,0,vw,vh);
+    g.addColorStop(0, "#1e3a8a");
+    g.addColorStop(1, "#0b1020");
+    bgCtx.fillStyle = g;
+    bgCtx.fillRect(0,0,vw,vh);
+
+    // halos doux
+    for(let i=0;i<35;i++){
+      bgCtx.fillStyle = "rgba(255,255,255,0.035)";
+      bgCtx.beginPath();
+      bgCtx.arc(Math.random()*vw, Math.random()*vh, 60+Math.random()*160, 0, Math.PI*2);
+      bgCtx.fill();
+    }
+
+    // petites étoiles / grains
+    for(let i=0;i<260;i++){
+      const a = 0.04 + Math.random()*0.08;
+      bgCtx.fillStyle = `rgba(255,255,255,${a})`;
+      bgCtx.fillRect(Math.random()*vw, Math.random()*vh, 1, 1);
+    }
+  }
+
+  // ---------- HELPERS ----------
+  const TAU = Math.PI*2;
+  function rand(a,b){ return a + Math.random()*(b-a); }
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+  // ---------- PHYSIQUE (2D) + PROFONDEUR (3D visuelle) ----------
+  class Ball{
+    constructor(id){
+      this.id = id;
+      this.r = rand(CFG.R_MIN, CFG.R_MAX);
+
+      // positions monde: origine au centre de l'écran
+      this.x = rand(-bounds.halfW + this.r, bounds.halfW - this.r);
+      this.y = rand(-bounds.halfH + this.r, bounds.halfH - this.r);
+      this.z = rand(CFG.DEPTH_MIN, CFG.DEPTH_MAX);
+
+      // vitesses en px/s
+      this.vx = rand(-20, 20);
+      this.vy = rand(-20, 20);
+      this.vz = rand(-10, 10);
+
+      // projection
+      this.px = 0; this.py = 0; this.pr = this.r; this.depth = 0;
+      this.scale = 1;
+    }
+
+    update(gWorld, dt){
+      // accélérations (px/s²)
+      this.vx += gWorld.x * dt;
+      this.vy += gWorld.y * dt;
+      this.vz += gWorld.z * dt;
+
+      // damping exponentiel stable
+      const damp = Math.exp(-CFG.DAMPING * dt);
+      this.vx *= damp; this.vy *= damp; this.vz *= damp;
+
+      // intégration
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+      this.z += this.vz * dt;
+
+      // murs (plan écran)
+      const minX = -bounds.halfW + this.r, maxX = bounds.halfW - this.r;
+      const minY = -bounds.halfH + this.r, maxY = bounds.halfH - this.r;
+
+      if(this.x < minX){ this.x = minX; this.vx *= -CFG.RESTITUTION; }
+      if(this.x > maxX){ this.x = maxX; this.vx *= -CFG.RESTITUTION; }
+      if(this.y < minY){ this.y = minY; this.vy *= -CFG.RESTITUTION; }
+      if(this.y > maxY){ this.y = maxY; this.vy *= -CFG.RESTITUTION; }
+
+      // profondeur clamp
+      if(this.z < CFG.DEPTH_MIN){ this.z = CFG.DEPTH_MIN; this.vz *= -0.7; }
+      if(this.z > CFG.DEPTH_MAX){ this.z = CFG.DEPTH_MAX; this.vz *= -0.7; }
+    }
+
+    project(cam){
+      // monde -> caméra (yaw puis pitch)
+      let x = this.x;
+      let y = this.y;
+      let z = this.z;
+
+      const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+      let dx = cy*x - sy*z;
+      let dz = sy*x + cy*z;
+
+      const cx = Math.cos(cam.pitch), sx = Math.sin(cam.pitch);
+      let dy = cx*y - sx*dz;
+      dz = sx*y + cx*dz;
+
+      const s = CFG.FOV / (CFG.FOV + dz);
+      this.scale = s;
+      this.px = dx * s + vw/2;
+      this.py = dy * s + vh/2;
+      this.pr = this.r * s;
+      this.depth = dz;
+    }
+  }
+
+  const balls = [];
+  function initBalls(){
+    balls.length = 0;
+    for(let i=0;i<CFG.COUNT;i++) balls.push(new Ball(i));
+  }
+
+  // collisions entre boules (2D)
+  function solveCollisions(){
+    for(let i=0;i<balls.length;i++){
+      const a = balls[i];
+      for(let j=i+1;j<balls.length;j++){
+        const b = balls[j];
+
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const minDist = a.r + b.r;
+        const d2 = dx*dx + dy*dy;
+
+        if(d2 === 0 || d2 >= minDist*minDist) continue;
+
+        const d = Math.sqrt(d2);
+        const nx = dx / d;
+        const ny = dy / d;
+
+        // séparation (anti-chevauchement)
+        const overlap = (minDist - d);
+        const ma = a.r*a.r;
+        const mb = b.r*b.r;
+        const invA = 1/ma, invB = 1/mb;
+        const sumInv = invA + invB;
+
+        a.x -= nx * overlap * (invA / sumInv);
+        a.y -= ny * overlap * (invA / sumInv);
+        b.x += nx * overlap * (invB / sumInv);
+        b.y += ny * overlap * (invB / sumInv);
+
+        // impulse (rebond)
+        const rvx = b.vx - a.vx;
+        const rvy = b.vy - a.vy;
+        const velAlongNormal = rvx*nx + rvy*ny;
+
+        if(velAlongNormal > 0) continue;
+
+        const e = 0.72;
+        const jImpulse = -(1 + e) * velAlongNormal / (invA + invB);
+
+        const ix = jImpulse * nx;
+        const iy = jImpulse * ny;
+
+        a.vx -= ix * invA;
+        a.vy -= iy * invA;
+        b.vx += ix * invB;
+        b.vy += iy * invB;
+      }
+    }
+  }
+
+  // ---------- CAPTEURS ----------
+  const dbg = document.getElementById("dbg");
+
+  const sensor = {
+    enabled:false,
+    // gravité (screen coords, m/s²)
+    gx:0, gy:0, gz:0,
+    // base de calibration
+    bx:0, by:0, bz:0,
+    hasData:false,
+    source:""
+  };
+
+  function getScreenAngle(){
+    if (screen.orientation && typeof screen.orientation.angle === "number") return screen.orientation.angle;
+    if (typeof window.orientation === "number") return window.orientation;
+    return 0;
+  }
+
+  function rotateByScreenOrientation(x, y, z){
+    const a = getScreenAngle();
+    // rotation des axes pour que x=vers la droite de l'écran, y=vers le haut de l'écran (avant inversion)
+    if(a === 90)  return { x: y,  y: -x, z };
+    if(a === -90 || a === 270) return { x: -y, y: x,  z };
+    if(a === 180) return { x: -x, y: -y, z };
+    return { x, y, z }; // 0
+  }
+
+  function onMotion(e){
+    const g = e.accelerationIncludingGravity;
+    if(!g) return;
+
+    const r = rotateByScreenOrientation(g.x || 0, g.y || 0, g.z || 0);
+
+    // IMPORTANT: on veut y positif = vers le bas écran
+    sensor.gx = r.x;
+    sensor.gy = -(r.y);
+    sensor.gz = r.z;
+
+    sensor.hasData = true;
+    sensor.source = "devicemotion";
+  }
+
+  // fallback (si pas de devicemotion): deviceorientation (moins précis)
+  function onOrientation(e){
+    // si devicemotion marche, on ignore ce fallback
+    if(sensor.source === "devicemotion") return;
+
+    const beta = e.beta ?? 0;   // avant/arrière
+    const gamma = e.gamma ?? 0; // gauche/droite
+    // approx gravité sur plan (m/s²)
+    // tel plat: beta~0 gamma~0 ; inclinaison => sin() donne le composant
+    const angle = getScreenAngle();
+
+    let tx = gamma, ty = beta;
+    // rotation selon orientation écran
+    if(angle === 90){  [tx,ty] = [-ty, tx]; }
+    if(angle === -90 || angle === 270){ [tx,ty] = [ty, -tx]; }
+    if(angle === 180){ tx = -tx; ty = -ty; }
+
+    const radX = tx * Math.PI/180;
+    const radY = ty * Math.PI/180;
+
+    sensor.gx = Math.sin(radX) * 9.81;
+    sensor.gy = Math.sin(radY) * 9.81;
+    sensor.gz = 0;
+
+    sensor.hasData = true;
+    sensor.source = "deviceorientation";
+  }
+
+  async function requestSensors(){
+    // iOS: permissions nécessaires
+    let motionOK = true;
+    let orientOK = true;
+
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+      try { motionOK = (await DeviceMotionEvent.requestPermission()) === "granted"; }
+      catch { motionOK = false; }
+    }
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      try { orientOK = (await DeviceOrientationEvent.requestPermission()) === "granted"; }
+      catch { orientOK = false; }
+    }
+
+    // on écoute les 2, puis on prendra devicemotion si dispo
+    window.addEventListener("devicemotion", onMotion, { passive:true });
+    window.addEventListener("deviceorientation", onOrientation, { passive:true });
+
+    sensor.enabled = motionOK || orientOK;
+    return sensor.enabled;
+  }
+
+  function calibrate(){
+    if(!sensor.hasData){
+      dbg.textContent = "Capteurs: bouge un peu le tel puis recalibre.";
+      return;
+    }
+    sensor.bx = sensor.gx;
+    sensor.by = sensor.gy;
+    sensor.bz = sensor.gz;
+    dbg.textContent = `Calibré ✅ (${sensor.source})`;
+  }
+
+  document.getElementById("start").addEventListener("click", async () => {
+    const ok = await requestSensors();
+    if(!ok){
+      dbg.textContent = "Capteurs refusés ou indisponibles (ouvre en Safari/HTTPS).";
+      return;
+    }
+    // petite attente: la première mesure arrive vite
+    dbg.textContent = "Capteurs activés ✅ (pose à plat puis Calibrer)";
+  });
+
+  document.getElementById("calib").addEventListener("click", calibrate);
+
+  // ---------- CAMERA + GRAVITÉ ----------
+  const camera = { yaw:0, pitch:0 };
+
+  function camToWorld(vCam){
+    // inverse (pitch puis yaw) pour que le mouvement reste aligné écran
+    const cy = Math.cos(camera.yaw), sy = Math.sin(camera.yaw);
+    const cx = Math.cos(camera.pitch), sx = Math.sin(camera.pitch);
+
+    // inverse pitch (rotation X -pitch)
+    let x1 = vCam.x;
+    let y1 =  cx*vCam.y + sx*vCam.z;
+    let z1 = -sx*vCam.y + cx*vCam.z;
+
+    // inverse yaw (rotation Y -yaw)
+    let x2 =  cy*x1 + sy*z1;
+    let y2 =  y1;
+    let z2 = -sy*x1 + cy*z1;
+
+    return { x:x2, y:y2, z:z2 };
+  }
+
+  // ---------- RENDER (liquid glass) ----------
+  function drawGlassSphere(b, t, tiltX, tiltY){
+    const x = b.px, y = b.py, r = b.pr;
+    if(r < 1.1) return;
+
+    // petite "vibration liquide"
+    const wob = 0.06 * Math.sin(t*0.002 + b.id*1.7);
+
+    // direction de "lumière" liée au tilt (reflet qui bouge)
+    const lx = -tiltX;
+    const ly = -tiltY;
+
+    const offX = (lx * r * 0.22) + Math.sin(t*0.003 + b.id)*r*0.06;
+    const offY = (ly * r * 0.22) + Math.cos(t*0.002 + b.id)*r*0.06;
+
+    // refraction (facultatif)
+    if(CFG.REFRACTION){
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x,y,r,0,TAU);
+      ctx.clip();
+
+      const s = 1.18 + wob;
+      ctx.globalAlpha = 0.95;
+      ctx.drawImage(
+        bgCanvas,
+        x - r*s + offX, y - r*s + offY, r*2*s, r*2*s,
+        x - r, y - r, r*2, r*2
+      );
+      ctx.restore();
+    }
+
+    // corps verre (gradient)
+    const g = ctx.createRadialGradient(
+      x - r*0.33 + offX*0.18,
+      y - r*0.33 + offY*0.18,
+      r*0.18,
+      x, y, r
+    );
+    g.addColorStop(0.00, "rgba(255,255,255,0.55)");
+    g.addColorStop(0.28, "rgba(255,255,255,0.16)");
+    g.addColorStop(1.00, "rgba(255,255,255,0.05)");
+
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x,y,r,0,TAU);
+    ctx.fill();
+
+    // highlight spéculaire
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    ctx.beginPath();
+    ctx.arc(x - r*0.38 + offX*0.25, y - r*0.38 + offY*0.25, r*0.22, 0, TAU);
+    ctx.fill();
+
+    // bord lumineux
+    ctx.strokeStyle = "rgba(255,255,255,0.34)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(x,y,r-0.6,0,TAU);
+    ctx.stroke();
+
+    // petit arc "caustic"
+    ctx.strokeStyle = "rgba(255,255,255,0.16)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x + r*0.10, y + r*0.10, r*0.65, -0.2, 1.55);
+    ctx.stroke();
+  }
+
+  // ---------- ANIMATION LOOP ----------
+  let lastT = performance.now();
+  function animate(t){
+    const dt = Math.min(0.033, (t - lastT) / 1000);
+    lastT = t;
+
+    // fond
+    ctx.clearRect(0,0,vw,vh);
+    ctx.drawImage(bgCanvas, 0,0,vw,vh);
+
+    // si on a des capteurs: tilt = composant gravité (après calibration)
+    const dx = (sensor.gx - sensor.bx);
+    const dy = (sensor.gy - sensor.by);
+    const dz = (sensor.gz - sensor.bz);
+
+    // tilt normalisé -1..1 (pour la caméra / reflets)
+    const tiltX = clamp(dx / 9.81, -1, 1);
+    const tiltY = clamp(dy / 9.81, -1, 1);
+
+    // camera: petit effet 3D MAIS le mouvement reste aligné écran
+    const targetYaw   = clamp(tiltX * CFG.CAMERA_MAX, -CFG.CAMERA_MAX, CFG.CAMERA_MAX);
+    const targetPitch = clamp(tiltY * CFG.CAMERA_MAX, -CFG.CAMERA_MAX, CFG.CAMERA_MAX);
+    camera.yaw   += (targetYaw - camera.yaw) * CFG.CAMERA_SMOOTH;
+    camera.pitch += (targetPitch - camera.pitch) * CFG.CAMERA_SMOOTH;
+
+    // gravité en coords "écran"
+    const gCam = {
+      x: dx * CFG.ACCEL_SCALE,
+      y: dy * CFG.ACCEL_SCALE,
+      z: dz * CFG.ACCEL_SCALE_Z
+    };
+    // converti en monde si caméra bouge, pour conserver "droite = droite"
+    const gWorld = camToWorld(gCam);
+
+    // update
+    for(const b of balls) b.update(gWorld, dt);
+    solveCollisions();
+
+    // projection + tri profondeur
+    for(const b of balls) b.project(camera);
+    balls.sort((a,b) => a.depth - b.depth); // du fond vers l'avant
+
+    // draw
+    for(const b of balls) drawGlassSphere(b, t, tiltX, tiltY);
+
+    // debug
+    if(sensor.enabled){
+      dbg.textContent =
+        `Capteurs: OK (${sensor.source || "…"}) | tilt x:${tiltX.toFixed(2)} y:${tiltY.toFixed(2)} | boules:${CFG.COUNT}`;
+    }else{
+      dbg.textContent = "Capteurs: clique “Activer capteurs” (HTTPS obligatoire).";
+    }
+
+    requestAnimationFrame(animate);
+  }
+
+  // init
+  resize();
+  initBalls();
+  requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>  H = canvas.height = innerHeight * dpr;
   canvas.style.width = innerWidth+"px";
   canvas.style.height = innerHeight+"px";
   ctx.setTransform(dpr,0,0,dpr,0,0);
